@@ -75,10 +75,10 @@ class Synthesizer:
             out[name] = self._synth_column(by_name[name], df, n)
 
         frame = pd.DataFrame(out)
-        # 3) null-маски (кроме PK-гипотезы) по доле not_null_perc
+        # 3) null-маски (кроме PK) по доле not_null_perc
         for name in cols_order:
             cp = by_name[name]
-            if not cp.is_pk_hypothesis:
+            if not cp.is_pk:
                 self._apply_nulls(frame, name, cp.not_null_perc, n)
         return frame.reindex(columns=cols_order)
 
@@ -231,8 +231,17 @@ class Synthesizer:
             sampled = real.sample(n=n, replace=True, random_state=self.cfg.seed).astype(str)
             return [self.faker.mask_text(v) for v in sampled]
 
+        # даты (не чувствительные) НЕ маскируем и НЕ превращаем в плейсхолдеры —
+        # реальные значения как есть; проверяем ДО PK/uniqueness, иначе дата-PK
+        # уходила в SYN-заглушку. Даты рождения (kind=birth) — не сюда, они маскируются.
+        if _is(cp.dtype, _DATE) and not cp.is_sensitive:
+            if not real.empty:
+                return self._resample(real, real.unique().tolist(), n)
+            if cp.min is not None and cp.max is not None:
+                return self._date_range(cp, n)
+
         # PK / почти уникальные → уникальные значения
-        if cp.is_pk_hypothesis or cp.unique_perc >= 99:
+        if cp.is_pk or cp.unique_perc >= 99:
             return self._unique_values(cp, n)
 
         # категории → ресэмпл реального распределения

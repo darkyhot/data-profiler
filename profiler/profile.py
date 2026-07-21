@@ -45,7 +45,7 @@ class ColumnProfile:
     not_null_perc: float = 0.0
     unique_perc: float = 0.0
     n_distinct: int = 0
-    is_pk_hypothesis: bool = False
+    is_pk: bool = False
     min: object = None            # только не-чувствительные числа/даты
     max: object = None
     len_min: int | None = None    # длины строк (для текстов)
@@ -60,7 +60,7 @@ class ColumnProfile:
             "semantic_class": self.semantic_class, "is_sensitive": self.is_sensitive,
             "sensitive_kind": self.sensitive_kind, "not_null_perc": self.not_null_perc,
             "unique_perc": self.unique_perc, "n_distinct": self.n_distinct,
-            "is_pk_hypothesis": self.is_pk_hypothesis,
+            "is_pk": self.is_pk,
             "min": _jsonable(self.min), "max": _jsonable(self.max),
             "len_min": self.len_min, "len_max": self.len_max,
             "categories": self.categories, "sample_values": self.sample_values,
@@ -76,7 +76,8 @@ class TableProfile:
     est_rows: int
     sample_rows: int
     sample_fraction: float
-    pk_hypothesis: list[str]
+    pk: list[str]
+    pk_exact: bool                # True — подтверждён на полной таблице; False — по сэмплу
     columns: list[ColumnProfile]
 
     @property
@@ -88,7 +89,7 @@ class TableProfile:
             "schema": self.schema, "table": self.table, "fqn": self.fqn,
             "description": self.description, "est_rows": self.est_rows,
             "sample_rows": self.sample_rows, "sample_fraction": round(self.sample_fraction, 6),
-            "pk_hypothesis": self.pk_hypothesis,
+            "pk": self.pk, "pk_exact": self.pk_exact,
             "columns": [c.to_dict() for c in self.columns],
         }
 
@@ -138,10 +139,12 @@ def _classify(name: str, dtype: str, unique_pct: float, n_distinct: int) -> str:
     return "attribute"
 
 
-def find_pk(df: pd.DataFrame, max_cols: int = 4) -> list[str]:
-    """Минимальная уникальная комбинация на сэмпле. Метрики и СИСТЕМНЫЕ
-    таймстемпы (load/inserted/_dttm) откладываем — иначе почти-уникальный
-    служебный столбец ложно становится ключом."""
+def find_pk_candidates(df: pd.DataFrame, max_cols: int = 4,
+                       max_candidates: int = 8) -> list[list[str]]:
+    """МИНИМАЛЬНЫЕ уникальные комбинации колонок на сэмпле (составные — тоже),
+    отсортированы по предпочтительности (бизнес-ключи раньше метрик/служебных
+    таймстемпов, меньший размер раньше). Возвращаем шорт-лист — раннер потом
+    подтверждает первый прошедший на ПОЛНОЙ таблице (точный PK)."""
     if df.empty:
         return []
     cols = [c for c in df.columns if df[c].notna().all() and df[c].nunique(dropna=False) > 1]
@@ -153,13 +156,24 @@ def find_pk(df: pd.DataFrame, max_cols: int = 4) -> list[str]:
 
     preferred = [c for c in cols if not low_priority(c)]
     deferred = [c for c in cols if low_priority(c)]
-    for candidates in ([preferred] if preferred else []) + [preferred + deferred]:
-        upper = min(max_cols, len(candidates))
-        for size in range(1, upper + 1):
-            for combo in combinations(candidates, size):
-                if not df.duplicated(subset=list(combo)).any():
-                    return list(combo)
-    return []
+    ordered = preferred + deferred                      # бизнес-ключи раньше служебных
+    found: list[list[str]] = []
+    for size in range(1, min(max_cols, len(ordered)) + 1):
+        for combo in combinations(ordered, size):
+            cset = set(combo)
+            if any(set(k) <= cset for k in found):      # только МИНИМАЛЬНЫЕ (не супермножества)
+                continue
+            if not df.duplicated(subset=list(combo)).any():
+                found.append(list(combo))
+                if len(found) >= max_candidates:
+                    return found
+    return found
+
+
+def find_pk(df: pd.DataFrame, max_cols: int = 4) -> list[str]:
+    """Лучший кандидат PK по сэмплу (совместимость / когда проверка выключена)."""
+    cands = find_pk_candidates(df, max_cols, max_candidates=1)
+    return cands[0] if cands else []
 
 
 def _minmax(series: pd.Series, dtype: str):
@@ -229,10 +243,12 @@ def profile_column(series: pd.Series, meta: dict, n: int, max_categories: int,
 
 def profile_table(df: pd.DataFrame, cols_meta: list[dict], *, schema: str, table: str,
                   description: str, est_rows: int, sample_fraction: float,
-                  max_categories: int, force_sensitive: dict | None = None,
+                  max_categories: int, pk: list[str] | None = None, pk_exact: bool = False,
+                  force_sensitive: dict | None = None,
                   force_non_sensitive: set | None = None) -> TableProfile:
     n = len(df)
-    pk = find_pk(df)
+    pk = pk if pk is not None else find_pk(df)
+    pkset = set(pk)
     columns: list[ColumnProfile] = []
     for cm in cols_meta:
         name = cm["column_name"]
@@ -240,9 +256,9 @@ def profile_table(df: pd.DataFrame, cols_meta: list[dict], *, schema: str, table
         cp = profile_column(series, cm, n, max_categories,
                             force_sensitive=force_sensitive,
                             force_non_sensitive=force_non_sensitive)
-        cp.is_pk_hypothesis = name in pk
+        cp.is_pk = name in pkset
         columns.append(cp)
     return TableProfile(
         schema=schema, table=table, description=description, est_rows=est_rows,
-        sample_rows=n, sample_fraction=sample_fraction, pk_hypothesis=pk, columns=columns,
+        sample_rows=n, sample_fraction=sample_fraction, pk=pk, pk_exact=pk_exact, columns=columns,
     )

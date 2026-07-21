@@ -37,6 +37,8 @@ class RunConfig:
     tables: list[str]                              # ["schema.table", ...]
     correlated_groups: list[list[str]] = field(default_factory=list)
     max_categories: int = 300                      # уник. <= этого → перечислить ВСЕ значения
+    verify_pk: bool = True                         # подтверждать PK одним запросом на полной таблице (точный PK)
+    pk_max_cols: int = 4                           # макс. размер составного PK при поиске
     sample_rows_profile: int = 100_000             # сколько строк тянуть в pandas для профиля
     synth_rows: int = 1000                         # сколько синтетических строк генерить
     llm_pool_size: int = 60                        # размер LLM-пула фейков на колонку/ключ
@@ -50,9 +52,9 @@ class RunConfig:
     seed: int = 42                                 # детерминизм ресэмплинга/фейкера
 
     def __post_init__(self) -> None:
-        if not self.tables:
-            raise ValueError("TABLES пуст — задайте список 'schema.table'.")
-        for t in self.tables:
+        if not self.tables and not self.full_tables:
+            raise ValueError("TABLES и FULL_TABLES пусты — задайте хотя бы один список 'schema.table'.")
+        for t in list(self.tables) + list(self.full_tables):
             if "." not in t:
                 raise ValueError(f"Таблица '{t}' должна быть в формате schema.table")
         self.output_dir = Path(self.output_dir)
@@ -84,6 +86,8 @@ def from_namespace(ns: dict) -> RunConfig:
         tables=list(ns.get("TABLES", [])),
         correlated_groups=[list(g) for g in ns.get("CORRELATED_GROUPS", [])],
         max_categories=int(ns.get("MAX_CATEGORIES", 300)),
+        verify_pk=bool(ns.get("VERIFY_PK", True)),
+        pk_max_cols=int(ns.get("PK_MAX_COLS", 4)),
         sample_rows_profile=int(ns.get("SAMPLE_ROWS_PROFILE", 100_000)),
         synth_rows=int(ns.get("SYNTH_ROWS", 1000)),
         llm_pool_size=int(ns.get("LLM_POOL_SIZE", 60)),

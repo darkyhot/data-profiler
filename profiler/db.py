@@ -77,6 +77,23 @@ class Db:
         logger.info("full %s.%s: строк=%d", schema, table, len(df))
         return df, len(df)
 
+    def verify_unique(self, schema: str, table: str, cols: list[str]) -> bool:
+        """Точная проверка уникальности комбинации на ПОЛНОЙ таблице (один
+        агрегат). True — дубликатов нет (это точный PK). При ошибке → False.
+        NULL в ключе тоже ловится: строки с NULL группируются и дают дубль."""
+        if not cols:
+            return False
+        ident = f'"{schema}"."{table}"'
+        cols_sql = ", ".join(f'"{c}"' for c in cols)
+        sql = f"SELECT 1 FROM {ident} GROUP BY {cols_sql} HAVING count(*) > 1 LIMIT 1"
+        try:
+            with self.engine.connect() as conn:
+                dup = conn.execute(text(sql)).fetchone()
+            return dup is None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("verify_unique %s.%s %s: %s", schema, table, cols, exc)
+            return False
+
     # ── интроспекция схемы ───────────────────────────────────────────────────
     def introspect_columns(self, schema: str, table: str) -> list[dict]:
         """Колонки таблицы: имя, тип, nullable — в порядке ordinal_position."""
