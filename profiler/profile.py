@@ -139,34 +139,48 @@ def _classify(name: str, dtype: str, unique_pct: float, n_distinct: int) -> str:
     return "attribute"
 
 
-def find_pk_candidates(df: pd.DataFrame, max_cols: int = 4,
-                       max_candidates: int = 8) -> list[list[str]]:
+def find_pk_candidates(df: pd.DataFrame, max_cols: int = 4, max_candidates: int = 5,
+                       max_combos: int = 3000, pk_sample: int = 20000) -> list[list[str]]:
     """МИНИМАЛЬНЫЕ уникальные комбинации колонок на сэмпле (составные — тоже),
-    отсортированы по предпочтительности (бизнес-ключи раньше метрик/служебных
-    таймстемпов, меньший размер раньше). Возвращаем шорт-лист — раннер потом
-    подтверждает первый прошедший на ПОЛНОЙ таблице (точный PK)."""
+    от меньшего размера к большему.
+
+    Быстро:
+    - детекция идёт по подвыборке (<= pk_sample строк) — как в исходном подходе
+      «pandas на сэмпле с лимитом»; полную уникальность потом подтверждает
+      VERIFY_PK одним запросом на всей таблице;
+    - как только на размере найден ключ — глубже НЕ идём (меньший ключ всегда
+      предпочтительнее, больший был бы его супермножеством) → одноколоночный PK
+      находится за один проход по колонкам;
+    - колонки пробуются по убыванию кардинальности (компоненты ключа обычно
+      высококардинальны, бизнес-ключи раньше служебных таймстемпов/метрик);
+    - max_combos — жёсткий предел на случай широкой таблицы без короткого ключа."""
     if df.empty:
         return []
-    cols = [c for c in df.columns if df[c].notna().all() and df[c].nunique(dropna=False) > 1]
+    if len(df) > pk_sample:
+        df = df.sample(pk_sample, random_state=0)
+    nun = {c: df[c].nunique(dropna=False) for c in df.columns}
+    cols = [c for c in df.columns if df[c].notna().all() and nun[c] > 1]
     if not cols:
         return []
 
     def low_priority(c: str) -> bool:
         return _is_metric(c) or bool(_SYS_TS_RE.search(c))
 
-    preferred = [c for c in cols if not low_priority(c)]
-    deferred = [c for c in cols if low_priority(c)]
-    ordered = preferred + deferred                      # бизнес-ключи раньше служебных
+    # бизнес-ключи раньше служебных; внутри — по убыванию кардинальности
+    ordered = sorted(cols, key=lambda c: (low_priority(c), -nun[c]))
     found: list[list[str]] = []
+    checked = 0
     for size in range(1, min(max_cols, len(ordered)) + 1):
         for combo in combinations(ordered, size):
-            cset = set(combo)
-            if any(set(k) <= cset for k in found):      # только МИНИМАЛЬНЫЕ (не супермножества)
-                continue
+            if checked >= max_combos:
+                return found
+            checked += 1
             if not df.duplicated(subset=list(combo)).any():
                 found.append(list(combo))
                 if len(found) >= max_candidates:
                     return found
+        if found:                    # нашли ключи этого размера → глубже не идём
+            return found
     return found
 
 

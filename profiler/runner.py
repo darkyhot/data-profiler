@@ -126,10 +126,11 @@ def _resolve_pk(cfg, db, schema: str, table: str, df, is_full: bool) -> tuple[li
         return candidates[0], True    # уникальность проверена на полных данных (pandas)
     if not cfg.verify_pk:
         return candidates[0], False   # чистый pandas по сэмплу, без нагрузки на БД
-    for cand in candidates:
+    # каждая проверка — полный агрегат по таблице, поэтому пробуем не более 3 лучших
+    for cand in candidates[:3]:
         if db.verify_unique(schema, table, cand):
             logger.info("%s.%s: PK подтверждён на полной таблице: %s", schema, table, cand)
             return cand, True
-    logger.warning("%s.%s: ни один кандидат PK %s не уникален на полной таблице — "
-                   "взят лучший по сэмплу", schema, table, candidates)
+    logger.warning("%s.%s: кандидаты PK %s не подтвердились на полной таблице — "
+                   "взят лучший по сэмплу (pk_exact=false)", schema, table, candidates[:3])
     return candidates[0], False
