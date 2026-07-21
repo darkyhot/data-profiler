@@ -17,7 +17,7 @@ from itertools import combinations
 
 import pandas as pd
 
-from .sensitivity import classify
+from .sensitivity import classify, detect_by_values
 
 _METRIC_RE = re.compile(
     r"(^|_)(qty|quantity|amt|amount|sum|total|cnt|count|avg|rate|ratio|pct|perc|val|value)($|_)", re.I
@@ -178,12 +178,23 @@ def _minmax(series: pd.Series, dtype: str):
     return s.min(), s.max()
 
 
-def profile_column(series: pd.Series, meta: dict, n: int, max_categories: int) -> ColumnProfile:
+def profile_column(series: pd.Series, meta: dict, n: int, max_categories: int,
+                   force_sensitive: dict | None = None,
+                   force_non_sensitive: set | None = None) -> ColumnProfile:
     name, dtype = meta["column_name"], meta["data_type"]
     is_nullable = meta["is_nullable"] == "YES"
-    is_sensitive, kind = classify(name)
+    is_sensitive, kind = classify(name, force_sensitive=force_sensitive,
+                                  force_non_sensitive=force_non_sensitive)
 
     non_null = series.dropna()
+
+    # детект PII по СОДЕРЖИМОМУ (напр. author_login с ФИО/email внутри значения),
+    # если не поймано по имени и колонка не в белом списке
+    if not is_sensitive and (name or "").lower() not in (force_non_sensitive or set()) \
+            and non_null.dtype == object and not non_null.empty:
+        d_sens, d_kind = detect_by_values(non_null.astype(str).tolist()[:500])
+        if d_sens:
+            is_sensitive, kind = True, d_kind
     nn_perc = round(float(series.notna().mean() * 100), 2) if n else 0.0
     n_distinct = int(non_null.nunique()) if n else 0
     uniq_perc = round(n_distinct / n * 100, 2) if n else 0.0
@@ -218,14 +229,17 @@ def profile_column(series: pd.Series, meta: dict, n: int, max_categories: int) -
 
 def profile_table(df: pd.DataFrame, cols_meta: list[dict], *, schema: str, table: str,
                   description: str, est_rows: int, sample_fraction: float,
-                  max_categories: int) -> TableProfile:
+                  max_categories: int, force_sensitive: dict | None = None,
+                  force_non_sensitive: set | None = None) -> TableProfile:
     n = len(df)
     pk = find_pk(df)
     columns: list[ColumnProfile] = []
     for cm in cols_meta:
         name = cm["column_name"]
         series = df[name] if name in df.columns else pd.Series([], dtype=object)
-        cp = profile_column(series, cm, n, max_categories)
+        cp = profile_column(series, cm, n, max_categories,
+                            force_sensitive=force_sensitive,
+                            force_non_sensitive=force_non_sensitive)
         cp.is_pk_hypothesis = name in pk
         columns.append(cp)
     return TableProfile(

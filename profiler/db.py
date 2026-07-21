@@ -68,6 +68,15 @@ class Db:
             df = pd.read_sql(text(sql), conn)
         return df, est, frac
 
+    def read_full(self, schema: str, table: str) -> tuple[pd.DataFrame, int]:
+        """Вся таблица целиком (для справочников). Возвращает (df, n).
+        Без сэмплинга — справочники малы и должны быть полными."""
+        ident = f'"{schema}"."{table}"'
+        with self.engine.connect() as conn:
+            df = pd.read_sql(text(f"SELECT * FROM {ident}"), conn)
+        logger.info("full %s.%s: строк=%d", schema, table, len(df))
+        return df, len(df)
+
     # ── интроспекция схемы ───────────────────────────────────────────────────
     def introspect_columns(self, schema: str, table: str) -> list[dict]:
         """Колонки таблицы: имя, тип, nullable — в порядке ordinal_position."""

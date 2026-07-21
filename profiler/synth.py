@@ -30,6 +30,9 @@ from .profile import ColumnProfile, TableProfile
 
 logger = logging.getLogger(__name__)
 
+# персональные виды чувствительности (в справочниках маскируем только их)
+_PERSONAL_KINDS = {"fio", "person", "freeform"}
+
 _NUM = ("int", "numeric", "decimal", "double", "real", "float", "smallint", "bigint", "money")
 _INT = ("int", "smallint", "bigint")
 _DATE = ("date", "timestamp", "time")
@@ -78,6 +81,43 @@ class Synthesizer:
             if not cp.is_pk_hypothesis:
                 self._apply_nulls(frame, name, cp.not_null_perc, n)
         return frame.reindex(columns=cols_order)
+
+    # ── справочник целиком: реальные данные, маскируем ТОЛЬКО персональные ─────
+    def mask_full_table(self, profile: TableProfile, df: pd.DataFrame,
+                        force_sensitive: dict | None = None) -> pd.DataFrame:
+        """Полная выгрузка справочника: все строки/значения реальные, маскируются
+        ТОЛЬКО персональные поля (ФИО/логины с ФИО+email). Коды, id (tb_id,
+        gosb_id), суммы и т.п. остаются как есть. Маппинг реальное→фейк
+        консистентен (одно значение → один фейк) — join по полю не ломается."""
+        forced = set(force_sensitive or {})
+        out = df.copy()
+        masked_cols: list[str] = []
+        for cp in profile.columns:
+            if cp.name not in out.columns:
+                continue
+            # маскируем только персональные виды (+ явно форсированные пользователем)
+            personal = cp.is_sensitive and cp.sensitive_kind in _PERSONAL_KINDS
+            if not (personal or cp.name.lower() in forced):
+                continue
+            out[cp.name] = self._mask_series(out[cp.name], cp.sensitive_kind)
+            masked_cols.append(cp.name)
+        if masked_cols:
+            logger.info("%s: справочник, маскируются только: %s", profile.fqn, masked_cols)
+        return out
+
+    def _mask_series(self, col: pd.Series, kind: str) -> pd.Series:
+        if kind == "freeform":
+            return col.map(lambda v: self.faker.mask_text(v) if pd.notna(v) else v)
+        mapping: dict = {}
+
+        def f(v):
+            if pd.isna(v):
+                return v
+            if v not in mapping:
+                mapping[v] = self.faker.value(kind or "fio", len(mapping))
+            return mapping[v]
+
+        return col.map(f)
 
     # ── корр-группы ──────────────────────────────────────────────────────────
     def _synth_group(self, cols: list[str], by_name: dict, df: pd.DataFrame,
@@ -183,6 +223,13 @@ class Synthesizer:
         # сохраняем АБСОЛЮТНОЕ число уникальных (обрезано числом строк сэмпла),
         # а не долю — иначе низкокардинальные поля схлопываются в 1 значение
         target_distinct = min(cp.n_distinct, n) if cp.n_distinct else 1
+
+        # freeform (композит с ФИО/email, напр. author_login): маскируем РЕАЛЬНЫЕ
+        # значения — формат сохранён, PII вырезана; проверяем ДО PK-ветки, т.к.
+        # логины часто почти уникальны
+        if cp.is_sensitive and cp.sensitive_kind == "freeform" and not real.empty:
+            sampled = real.sample(n=n, replace=True, random_state=self.cfg.seed).astype(str)
+            return [self.faker.mask_text(v) for v in sampled]
 
         # PK / почти уникальные → уникальные значения
         if cp.is_pk_hypothesis or cp.unique_perc >= 99:

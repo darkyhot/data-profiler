@@ -65,28 +65,42 @@ def _process_table(cfg: RunConfig, db: Db, synth: Synthesizer, schema: str, tabl
     if not cols_meta:
         raise ValueError(f"Таблица {fqn} не найдена или без колонок")
     table_comment, col_comments = db.read_comments(schema, table)
-    df, est, frac = db.sample_df(schema, table, cfg.sample_rows_profile)
+    is_full = fqn in cfg.full_tables
+    if is_full:                                    # справочник — целиком, без сэмплинга
+        df, n_rows = db.read_full(schema, table)
+        est, frac = n_rows, 1.0
+    else:
+        df, est, frac = db.sample_df(schema, table, cfg.sample_rows_profile)
 
     description = table_comment or table.replace("_", " ")
     profile = profile_table(
         df, cols_meta, schema=schema, table=table, description=description,
         est_rows=est, sample_fraction=frac, max_categories=cfg.max_categories,
+        force_sensitive=cfg.sensitive_columns, force_non_sensitive=cfg.non_sensitive_columns,
     )
     # описания колонок из комментариев (redirect уже учтён в read_comments)
     for cp in profile.columns:
         if col_comments.get(cp.name):
             cp.description = col_comments[cp.name]
 
-    groups = [g for g in cfg.correlated_groups
-              if sum(1 for c in g if c in {cm["column_name"] for cm in cols_meta}) >= 2]
-    sample_df = synth.synth_table(profile, df, groups)
+    if is_full:
+        # справочник целиком: реальные данные, маскируем только персональные поля
+        sample_df = synth.mask_full_table(profile, df, force_sensitive=cfg.sensitive_columns)
+    else:
+        masked = [c.name for c in profile.columns if c.is_sensitive]
+        if masked:
+            logger.info("%s: маскируются (проверь на ложные срабатывания): %s", fqn, masked)
+        groups = [g for g in cfg.correlated_groups
+                  if sum(1 for c in g if c in {cm["column_name"] for cm in cols_meta}) >= 2]
+        sample_df = synth.synth_table(profile, df, groups)
 
     p_path = io.write_profile(cfg.output_dir, profile)
     s_path = io.write_sample(cfg.output_dir, fqn, sample_df)
-    logger.info("%s: профиль=%s сэмпл=%s (%d строк, pk=%s)",
-                fqn, p_path.name, s_path.name, len(sample_df), profile.pk_hypothesis)
+    logger.info("%s: профиль=%s сэмпл=%s (%d строк, %s, pk=%s)", fqn, p_path.name, s_path.name,
+                len(sample_df), "СПРАВОЧНИК целиком" if is_full else "синтетика", profile.pk_hypothesis)
     return {
-        "fqn": fqn, "status": "ok", "est_rows": est, "sample_rows_profiled": len(df),
+        "fqn": fqn, "status": "ok", "mode": "full" if is_full else "synth",
+        "est_rows": est, "sample_rows_profiled": len(df),
         "synth_rows": len(sample_df), "pk_hypothesis": profile.pk_hypothesis,
         "profile": str(p_path), "sample": str(s_path),
     }

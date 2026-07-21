@@ -40,6 +40,11 @@ class RunConfig:
     sample_rows_profile: int = 100_000             # сколько строк тянуть в pandas для профиля
     synth_rows: int = 1000                         # сколько синтетических строк генерить
     llm_pool_size: int = 60                        # размер LLM-пула фейков на колонку/ключ
+    # Оверрайды чувствительности (по имени колонки). Приоритет над эвристикой.
+    non_sensitive_columns: set[str] = field(default_factory=set)   # НЕ маскировать (напр. tb_full_name)
+    sensitive_columns: dict[str, str] = field(default_factory=dict)  # колонка → тип фейка (inn/fio/money/…)
+    # Справочники: выгружать ЦЕЛИКОМ (без сэмплинга/синтеза), маскируя только чувствительные
+    full_tables: set[str] = field(default_factory=set)             # {"schema.table", ...}
     output_dir: Path = Path("./output")
     llm: LLMConfig = field(default_factory=LLMConfig)
     seed: int = 42                                 # детерминизм ресэмплинга/фейкера
@@ -51,6 +56,9 @@ class RunConfig:
             if "." not in t:
                 raise ValueError(f"Таблица '{t}' должна быть в формате schema.table")
         self.output_dir = Path(self.output_dir)
+        # нормализуем имена оверрайдов чувствительности к нижнему регистру
+        self.non_sensitive_columns = {c.lower() for c in self.non_sensitive_columns}
+        self.sensitive_columns = {k.lower(): v for k, v in self.sensitive_columns.items()}
 
 
 def _build_db_url(ns: dict) -> str:
@@ -79,6 +87,9 @@ def from_namespace(ns: dict) -> RunConfig:
         sample_rows_profile=int(ns.get("SAMPLE_ROWS_PROFILE", 100_000)),
         synth_rows=int(ns.get("SYNTH_ROWS", 1000)),
         llm_pool_size=int(ns.get("LLM_POOL_SIZE", 60)),
+        non_sensitive_columns=set(ns.get("NON_SENSITIVE_COLUMNS", []) or []),
+        sensitive_columns=dict(ns.get("SENSITIVE_COLUMNS", {}) or {}),
+        full_tables=set(ns.get("FULL_TABLES", []) or []),
         output_dir=Path(ns.get("OUTPUT_DIR", "./output")),
         llm=llm,
         seed=int(ns.get("SEED", 42)),
