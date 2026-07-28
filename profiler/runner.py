@@ -90,6 +90,13 @@ def _process_table(cfg: RunConfig, db: Db, synth: Synthesizer, schema: str, tabl
         if col_comments.get(cp.name):
             cp.description = col_comments[cp.name]
 
+    # добор ПОЛНОГО набора категорий одним запросом на таблицу: скошенные редкие
+    # значения (напр. level_name='sb') не попадают в сэмпл. Не для FULL_TABLES
+    # (там df — весь набор). Кандидаты = не-sensitive низкокардинальные (получившие
+    # список категорий из сэмпла).
+    if cfg.categories_full_scan and not is_full:
+        _complete_categories(cfg, db, schema, table, profile)
+
     if is_full:
         # справочник целиком: реальные данные, маскируем только персональные поля
         sample_df = synth.mask_full_table(profile, df, force_sensitive=cfg.sensitive_columns)
@@ -112,6 +119,37 @@ def _process_table(cfg: RunConfig, db: Db, synth: Synthesizer, schema: str, tabl
         "synth_rows": len(sample_df), "pk": profile.pk, "pk_exact": profile.pk_exact,
         "profile": str(p_path), "sample": str(s_path),
     }
+
+
+def _complete_categories(cfg, db, schema: str, table: str, profile) -> None:
+    """Дополнить категории кандидатов полным набором значений (один запрос-скан
+    на таблицу). Обновляет categories и category_freqs на месте; редким значениям,
+    отсутствующим в сэмпле, ставит нулевую долю (в синтетике они появятся ровно за
+    счёт гарантии «каждое значение ≥ 1 раз»)."""
+    cand = [cp.name for cp in profile.columns if cp.categories is not None]
+    if not cand:
+        return
+    exact = db.distinct_values(schema, table, cand)
+    if not exact:
+        return
+    completed = 0
+    for cp in profile.columns:
+        ev = exact.get(cp.name)
+        if not ev or cp.categories is None:
+            continue
+        base = set(cp.categories)
+        merged = base | {v.strip() for v in ev if v and v.strip()}
+        new_vals = merged - base
+        if not new_vals or not (0 < len(merged) <= cfg.max_categories):
+            continue                       # ничего нового или уже не «маленькая» категория
+        cp.categories = sorted(merged)
+        cp.category_freqs = dict(cp.category_freqs or {})
+        for v in new_vals:
+            cp.category_freqs.setdefault(v, 0.0)
+        completed += 1
+    if completed:
+        logger.info("%s.%s: категории дополнены полным набором для %d колонок",
+                    schema, table, completed)
 
 
 def _resolve_pk(cfg, db, schema: str, table: str, df, is_full: bool) -> tuple[list, bool]:

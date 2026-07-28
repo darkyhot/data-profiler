@@ -77,6 +77,30 @@ class Db:
         logger.info("full %s.%s: строк=%d", schema, table, len(df))
         return df, len(df)
 
+    def distinct_values(self, schema: str, table: str, cols: list[str]) -> dict[str, list[str]]:
+        """Точный ПОЛНЫЙ набор значений для нескольких НИЗКОКАРДИНАЛЬНЫХ колонок за
+        ОДИН запрос (не пер-атрибут): array_agg(DISTINCT c) по каждой. Нужен потому,
+        что скошенные редкие категории не попадают в сэмпл, а pg_stats на вьюхах нет.
+        Вызывать только для колонок-кандидатов (мало уникальных) — массивы малы.
+        Ошибка/таймаут → {} (деградация на категории по сэмплу), прогон не падает."""
+        if not cols:
+            return {}
+        ident = f'"{schema}"."{table}"'
+        selects = ", ".join(f'array_agg(DISTINCT "{c}"::text) AS "{c}"' for c in cols)
+        sql = f"SELECT {selects} FROM {ident}"
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(text(sql)).mappings().first()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("distinct_values %s.%s: %s", schema, table, exc)
+            return {}
+        out: dict[str, list[str]] = {}
+        if row:
+            for c in cols:
+                vals = row.get(c) or []
+                out[c] = [str(v) for v in vals if v is not None]
+        return out
+
     def verify_unique(self, schema: str, table: str, cols: list[str]) -> bool:
         """Точная проверка уникальности комбинации на ПОЛНОЙ таблице (один
         агрегат). True — дубликатов нет (это точный PK). При ошибке → False.

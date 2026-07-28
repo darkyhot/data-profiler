@@ -244,9 +244,10 @@ class Synthesizer:
         if cp.is_pk or cp.unique_perc >= 99:
             return self._unique_values(cp, n)
 
-        # категории → ресэмпл реального распределения
+        # категории → генерим из ПОЛНОГО набора (сэмпл + добор редких) со взвешиванием
+        # по долям; редкие (добор, доля 0) появляются за счёт гарантии «каждое ≥ 1 раз»
         if cp.categories:
-            return self._resample(real, cp.categories, n)
+            return self._gen_categories(cp, n)
 
         # чувствительные / free-text → пул фейков
         if cp.is_sensitive or cp.semantic_class == "free_text":
@@ -271,6 +272,25 @@ class Synthesizer:
         return [f"SYN-{i:06d}" for i in range(n)]
 
     # ── примитивы генерации ──────────────────────────────────────────────────
+    def _gen_categories(self, cp: ColumnProfile, n: int) -> list:
+        """Категории из полного набора: взвешенно по долям (доминирующие остаются
+        частыми), с гарантией — каждое значение хотя бы раз при n >= |категорий|,
+        чтобы редкие (level_name='sb') присутствовали и агент мог их тестировать."""
+        cats = list(cp.categories)
+        freqs = cp.category_freqs or {}
+        weights = [max(0.0, float(freqs.get(v, 0.0))) for v in cats]
+        if not any(w > 0 for w in weights):
+            weights = None
+        if n >= len(cats):
+            out = list(cats)                                  # каждое значение ≥ 1 раз
+            rem = n - len(cats)
+            if rem > 0:
+                out += self.r.choices(cats, weights=weights, k=rem)
+        else:
+            out = self.r.choices(cats, weights=weights, k=n)
+        self.r.shuffle(out)
+        return out
+
     def _resample(self, real: pd.Series, fallback_values: list, n: int) -> list:
         if real is not None and not real.empty:
             return real.sample(n=n, replace=True, random_state=self.cfg.seed).astype(object).tolist()

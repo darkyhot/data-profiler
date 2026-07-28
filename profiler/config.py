@@ -37,6 +37,7 @@ class RunConfig:
     tables: list[str]                              # ["schema.table", ...]
     correlated_groups: list[list[str]] = field(default_factory=list)
     max_categories: int = 300                      # уник. <= этого → перечислить ВСЕ значения
+    categories_full_scan: bool = True              # добрать полный набор категорий одним запросом на таблицу
     verify_pk: bool = True                         # подтверждать PK одним запросом на полной таблице (точный PK)
     pk_max_cols: int = 4                           # макс. размер составного PK при поиске
     sample_rows_profile: int = 100_000             # сколько строк тянуть в pandas для профиля
@@ -86,6 +87,7 @@ def from_namespace(ns: dict) -> RunConfig:
         tables=list(ns.get("TABLES", [])),
         correlated_groups=[list(g) for g in ns.get("CORRELATED_GROUPS", [])],
         max_categories=int(ns.get("MAX_CATEGORIES", 300)),
+        categories_full_scan=bool(ns.get("CATEGORIES_FULL_SCAN", True)),
         verify_pk=bool(ns.get("VERIFY_PK", True)),
         pk_max_cols=int(ns.get("PK_MAX_COLS", 4)),
         sample_rows_profile=int(ns.get("SAMPLE_ROWS_PROFILE", 100_000)),

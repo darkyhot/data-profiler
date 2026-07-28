@@ -51,6 +51,7 @@ class ColumnProfile:
     len_min: int | None = None    # длины строк (для текстов)
     len_max: int | None = None
     categories: list[str] | None = None   # ВСЕ значения, если это категория
+    category_freqs: dict[str, float] | None = None   # доли значений (для взвешенной синтетики)
     sample_values: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -63,7 +64,8 @@ class ColumnProfile:
             "is_pk": self.is_pk,
             "min": _jsonable(self.min), "max": _jsonable(self.max),
             "len_min": self.len_min, "len_max": self.len_max,
-            "categories": self.categories, "sample_values": self.sample_values,
+            "categories": self.categories, "category_freqs": self.category_freqs,
+            "sample_values": self.sample_values,
         }
         return d
 
@@ -243,10 +245,14 @@ def profile_column(series: pd.Series, meta: dict, n: int, max_categories: int,
         lens = non_null.astype(str).str.len()
         cp.len_min, cp.len_max = int(lens.min()), int(lens.max())
 
-    # категории: перечисляем ВСЕ значения, если их немного и колонка не чувствительна
+    # категории: перечисляем ВСЕ значения, если их немного и колонка не чувствительна.
+    # Доли из сэмпла (category_freqs) → взвешенная синтетика (доминирующие частые).
+    # Полный набор редких значений добирается позже одним запросом (см. runner).
     if not is_sensitive and 0 < n_distinct <= max_categories:
         vals = non_null.astype(str).map(str.strip)
-        cp.categories = sorted(v for v in vals.unique().tolist() if v != "")
+        vc = vals[vals != ""].value_counts(normalize=True)
+        cp.categories = sorted(vc.index.tolist())
+        cp.category_freqs = {str(k): float(v) for k, v in vc.items()}
 
     # примеры значений (для чувствительных — не сохраняем реальные)
     if not is_sensitive and not non_null.empty:
