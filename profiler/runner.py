@@ -34,7 +34,7 @@ def run(ns) -> dict:
     _setup_logging()
     load_dotenv()                       # подхватить токены из .env (если есть)
     cfg = ns if isinstance(ns, RunConfig) else from_namespace(dict(ns))
-    db = Db(cfg.db_url)
+    db = Db(cfg.db_url, statement_timeout_s=cfg.statement_timeout_s)
     llm = LLMClient(cfg.llm)
     if llm.enabled and not (llm.base_url and llm.token):
         logger.warning("LLM method=%s, но base_url/token пусты — синтез уйдёт в фолбэк-фейкер",
@@ -65,19 +65,26 @@ def run(ns) -> dict:
 
 def _process_table(cfg: RunConfig, db: Db, synth: Synthesizer, schema: str, table: str) -> dict:
     fqn = f"{schema}.{table}"
+    logger.info("[%s] фаза: интроспекция колонок", fqn)
     cols_meta = db.introspect_columns(schema, table)
     if not cols_meta:
         raise ValueError(f"Таблица {fqn} не найдена или без колонок")
+    logger.info("[%s] фаза: чтение комментариев", fqn)
     table_comment, col_comments = db.read_comments(schema, table)
     is_full = fqn in cfg.full_tables
     if is_full:                                    # справочник — целиком, без сэмплинга
+        logger.info("[%s] фаза: чтение ВСЕЙ таблицы (FULL_TABLES)", fqn)
         df, n_rows = db.read_full(schema, table)
         est, frac = n_rows, 1.0
     else:
+        logger.info("[%s] фаза: сэмплинг для профиля", fqn)
         df, est, frac = db.sample_df(schema, table, cfg.sample_rows_profile)
 
+    logger.info("[%s] фаза: определение PK%s", fqn,
+                " (+проверка запросом)" if cfg.verify_pk and not is_full else "")
     pk, pk_exact = _resolve_pk(cfg, db, schema, table, df, is_full)
 
+    logger.info("[%s] фаза: профилирование (pandas)", fqn)
     description = table_comment or table.replace("_", " ")
     profile = profile_table(
         df, cols_meta, schema=schema, table=table, description=description,
@@ -95,10 +102,12 @@ def _process_table(cfg: RunConfig, db: Db, synth: Synthesizer, schema: str, tabl
     # (там df — весь набор). Кандидаты = не-sensitive низкокардинальные (получившие
     # список категорий из сэмпла).
     if cfg.categories_full_scan and not is_full:
+        logger.info("[%s] фаза: добор полного набора категорий", fqn)
         _complete_categories(cfg, db, schema, table, profile)
 
     if is_full:
         # справочник целиком: реальные данные, маскируем только персональные поля
+        logger.info("[%s] фаза: маскировка справочника", fqn)
         sample_df = synth.mask_full_table(profile, df, force_sensitive=cfg.sensitive_columns)
     else:
         masked = [c.name for c in profile.columns if c.is_sensitive]
@@ -106,6 +115,8 @@ def _process_table(cfg: RunConfig, db: Db, synth: Synthesizer, schema: str, tabl
             logger.info("%s: маскируются (проверь на ложные срабатывания): %s", fqn, masked)
         groups = [g for g in cfg.correlated_groups
                   if sum(1 for c in g if c in {cm["column_name"] for cm in cols_meta}) >= 2]
+        logger.info("[%s] фаза: синтез сэмпла%s", fqn,
+                    " (с LLM)" if synth.llm else " (офлайн-фейкер)")
         sample_df = synth.synth_table(profile, df, groups)
 
     p_path = io.write_profile(cfg.output_dir, profile)

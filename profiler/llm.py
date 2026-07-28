@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import time
 
 import requests
 
@@ -87,7 +88,11 @@ class LLMClient:
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
         }
+        logger.info("→ LLM-запрос: model=%s, %d символов промпта (таймаут %ds)",
+                    self.cfg.model, len(system) + len(user), self.cfg.timeout_s)
+        t = time.perf_counter()
         resp = requests.post(url, headers=headers, json=data, timeout=self.cfg.timeout_s)
+        logger.info("← LLM-ответ: HTTP %s за %.2f c", resp.status_code, time.perf_counter() - t)
         if not resp.ok:
             raise LLMError(f"LLM HTTP {resp.status_code}: {resp.text[:500]}")
         payload = resp.json()

@@ -40,6 +40,7 @@ class RunConfig:
     categories_full_scan: bool = True              # добрать полный набор категорий одним запросом на таблицу
     verify_pk: bool = True                         # подтверждать PK одним запросом на полной таблице (точный PK)
     pk_max_cols: int = 4                           # макс. размер составного PK при поиске
+    statement_timeout_s: int = 0                   # предел на каждый SQL-запрос (0 = без лимита); >0 прервёт зависший скан
     sample_rows_profile: int = 100_000             # сколько строк тянуть в pandas для профиля
     synth_rows: int = 1000                         # сколько синтетических строк генерить
     llm_pool_size: int = 60                        # размер LLM-пула фейков на колонку/ключ
@@ -90,6 +91,7 @@ def from_namespace(ns: dict) -> RunConfig:
         categories_full_scan=bool(ns.get("CATEGORIES_FULL_SCAN", True)),
         verify_pk=bool(ns.get("VERIFY_PK", True)),
         pk_max_cols=int(ns.get("PK_MAX_COLS", 4)),
+        statement_timeout_s=int(ns.get("STATEMENT_TIMEOUT_S", 0)),
         sample_rows_profile=int(ns.get("SAMPLE_ROWS_PROFILE", 100_000)),
         synth_rows=int(ns.get("SYNTH_ROWS", 1000)),
         llm_pool_size=int(ns.get("LLM_POOL_SIZE", 60)),

@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from contextlib import contextmanager
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -21,11 +23,35 @@ from sqlalchemy.engine import Engine
 logger = logging.getLogger(__name__)
 
 
+def _short(sql: str, limit: int = 500) -> str:
+    """SQL в одну строку для лога (обрезка длинных)."""
+    s = " ".join(str(sql).split())
+    return s if len(s) <= limit else s[:limit] + " …"
+
+
 class Db:
-    def __init__(self, url: str, *, connect_timeout_s: int = 10):
-        self.engine: Engine = create_engine(
-            url, connect_args={"connect_timeout": connect_timeout_s}, pool_pre_ping=True
-        )
+    def __init__(self, url: str, *, connect_timeout_s: int = 10, statement_timeout_s: int = 0):
+        connect_args: dict = {"connect_timeout": connect_timeout_s}
+        # Жёсткий предел на КАЖДЫЙ запрос: если скан огромной вьюхи «виснет», запрос
+        # прервётся по таймауту (а не бесконечно), в логе будет видно на какой операции.
+        if statement_timeout_s and statement_timeout_s > 0:
+            connect_args["options"] = f"-c statement_timeout={int(statement_timeout_s) * 1000}"
+        self.engine: Engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+        self.statement_timeout_s = statement_timeout_s
+
+    @contextmanager
+    def _timed(self, label: str, sql: str | None = None):
+        """Лог: что за операция + SQL до запроса, и сколько заняла — после.
+        Так в консоли видно, на каком именно запросе к БД скрипт стоит."""
+        if sql is not None:
+            logger.info("→ %s | SQL: %s", label, _short(sql))
+        else:
+            logger.info("→ %s", label)
+        t = time.perf_counter()
+        try:
+            yield
+        finally:
+            logger.info("← %s | %.2f c", label, time.perf_counter() - t)
 
     # ── оценка размера и сэмплинг ────────────────────────────────────────────
     def estimate_rows(self, schema: str, table: str) -> int:
@@ -37,7 +63,7 @@ class Db:
             "WHERE ns.nspname = :s AND c.relname = :t"
         )
         try:
-            with self.engine.connect() as conn:
+            with self._timed(f"estimate_rows {schema}.{table}"), self.engine.connect() as conn:
                 row = conn.execute(sql, {"s": schema, "t": table}).fetchone()
             n = int(row[0]) if row and row[0] is not None else 0
             return max(n, 0)
@@ -64,7 +90,7 @@ class Db:
         else:
             sql = f"SELECT * FROM {ident} WHERE random() < {frac:.6f} LIMIT {int(sample_rows)}"
         logger.info("sample %s.%s: est=%s frac=%.5f limit=%s", schema, table, est, frac, sample_rows)
-        with self.engine.connect() as conn:
+        with self._timed(f"сэмпл {schema}.{table}", sql), self.engine.connect() as conn:
             df = pd.read_sql(text(sql), conn)
         return df, est, frac
 
@@ -72,8 +98,9 @@ class Db:
         """Вся таблица целиком (для справочников). Возвращает (df, n).
         Без сэмплинга — справочники малы и должны быть полными."""
         ident = f'"{schema}"."{table}"'
-        with self.engine.connect() as conn:
-            df = pd.read_sql(text(f"SELECT * FROM {ident}"), conn)
+        sql = f"SELECT * FROM {ident}"
+        with self._timed(f"read_full {schema}.{table} (ВСЯ таблица)", sql), self.engine.connect() as conn:
+            df = pd.read_sql(text(sql), conn)
         logger.info("full %s.%s: строк=%d", schema, table, len(df))
         return df, len(df)
 
@@ -89,7 +116,8 @@ class Db:
         selects = ", ".join(f'array_agg(DISTINCT "{c}"::text) AS "{c}"' for c in cols)
         sql = f"SELECT {selects} FROM {ident}"
         try:
-            with self.engine.connect() as conn:
+            with self._timed(f"добор категорий {schema}.{table} ({len(cols)} колонок, СКАН вьюхи)", sql), \
+                    self.engine.connect() as conn:
                 row = conn.execute(text(sql)).mappings().first()
         except Exception as exc:  # noqa: BLE001
             logger.warning("distinct_values %s.%s: %s", schema, table, exc)
@@ -111,7 +139,8 @@ class Db:
         cols_sql = ", ".join(f'"{c}"' for c in cols)
         sql = f"SELECT 1 FROM {ident} GROUP BY {cols_sql} HAVING count(*) > 1 LIMIT 1"
         try:
-            with self.engine.connect() as conn:
+            with self._timed(f"проверка PK {schema}.{table} {cols} (СКАН вьюхи)", sql), \
+                    self.engine.connect() as conn:
                 dup = conn.execute(text(sql)).fetchone()
             return dup is None
         except Exception as exc:  # noqa: BLE001
@@ -127,7 +156,7 @@ class Db:
             "WHERE table_schema = :s AND table_name = :t "
             "ORDER BY ordinal_position"
         )
-        with self.engine.connect() as conn:
+        with self._timed(f"колонки {schema}.{table}"), self.engine.connect() as conn:
             rows = conn.execute(sql, {"s": schema, "t": table}).fetchall()
         return [{"column_name": r[0], "data_type": r[1], "is_nullable": r[2]} for r in rows]
 
@@ -174,7 +203,7 @@ class Db:
             "WHERE a.attrelid = to_regclass(:reg) AND a.attnum > 0 AND NOT a.attisdropped"
         )
         try:
-            with self.engine.connect() as conn:
+            with self._timed(f"комментарии {reg}"), self.engine.connect() as conn:
                 tc = conn.execute(table_sql, {"reg": reg}).scalar()
                 col_rows = conn.execute(col_sql, {"reg": reg}).fetchall()
         except Exception as exc:  # noqa: BLE001
