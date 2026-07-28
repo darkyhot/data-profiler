@@ -246,9 +246,13 @@ def profile_column(series: pd.Series, meta: dict, n: int, max_categories: int,
         cp.len_min, cp.len_max = int(lens.min()), int(lens.max())
 
     # категории: перечисляем ВСЕ значения, если их немного и колонка не чувствительна.
+    # ТОЛЬКО настоящие категории (текст/enum/малые коды): метрики, даты и free_text
+    # категориями НЕ считаем — у метрики на проме могут быть миллионы distinct, и добор
+    # array_agg(DISTINCT) по ней вешает БД. Метрики уйдут в min/max, даты — в свою ветку.
     # Доли из сэмпла (category_freqs) → взвешенная синтетика (доминирующие частые).
     # Полный набор редких значений добирается позже одним запросом (см. runner).
-    if not is_sensitive and 0 < n_distinct <= max_categories:
+    if not is_sensitive and sclass not in ("metric", "date", "free_text") \
+            and 0 < n_distinct <= max_categories:
         vals = non_null.astype(str).map(str.strip)
         vc = vals[vals != ""].value_counts(normalize=True)
         cp.categories = sorted(vc.index.tolist())

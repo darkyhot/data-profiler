@@ -137,7 +137,18 @@ def _complete_categories(cfg, db, schema: str, table: str, profile) -> None:
     на таблицу). Обновляет categories и category_freqs на месте; редким значениям,
     отсутствующим в сэмпле, ставит нулевую долю (в синтетике они появятся ровно за
     счёт гарантии «каждое значение ≥ 1 раз»)."""
-    cand = [cp.name for cp in profile.columns if cp.categories is not None]
+    # кандидаты = настоящие категории (метрики/даты уже исключены на этапе профиля).
+    # Приоритет по наименьшей кардинальности (самые «категорийные» — раньше); при
+    # слишком широкой таблице ограничиваем число колонок в одном скане.
+    cand_cols = sorted((cp for cp in profile.columns if cp.categories is not None),
+                       key=lambda cp: cp.n_distinct)
+    cand = [cp.name for cp in cand_cols]
+    limit = cfg.categories_scan_max_cols
+    if len(cand) > limit:
+        logger.warning("%s.%s: категорий-кандидатов %d > лимита %d — добираю %d с наименьшей "
+                       "кардинальностью, остальные останутся по сэмплу: %s",
+                       schema, table, len(cand), limit, limit, cand[limit:])
+        cand = cand[:limit]
     if not cand:
         return
     exact = db.distinct_values(schema, table, cand)

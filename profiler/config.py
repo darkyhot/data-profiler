@@ -38,6 +38,7 @@ class RunConfig:
     correlated_groups: list[list[str]] = field(default_factory=list)
     max_categories: int = 300                      # уник. <= этого → перечислить ВСЕ значения
     categories_full_scan: bool = True              # добрать полный набор категорий одним запросом на таблицу
+    categories_scan_max_cols: int = 12             # макс. колонок в одном добор-скане (защита от широких таблиц)
     verify_pk: bool = True                         # подтверждать PK одним запросом на полной таблице (точный PK)
     pk_max_cols: int = 4                           # макс. размер составного PK при поиске
     statement_timeout_s: int = 0                   # предел на каждый SQL-запрос (0 = без лимита); >0 прервёт зависший скан
@@ -89,6 +90,7 @@ def from_namespace(ns: dict) -> RunConfig:
         correlated_groups=[list(g) for g in ns.get("CORRELATED_GROUPS", [])],
         max_categories=int(ns.get("MAX_CATEGORIES", 300)),
         categories_full_scan=bool(ns.get("CATEGORIES_FULL_SCAN", True)),
+        categories_scan_max_cols=int(ns.get("CATEGORIES_SCAN_MAX_COLS", 12)),
         verify_pk=bool(ns.get("VERIFY_PK", True)),
         pk_max_cols=int(ns.get("PK_MAX_COLS", 4)),
         statement_timeout_s=int(ns.get("STATEMENT_TIMEOUT_S", 0)),
