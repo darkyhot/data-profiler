@@ -151,7 +151,7 @@ def _complete_categories(cfg, db, schema: str, table: str, profile) -> None:
         cand = cand[:limit]
     if not cand:
         return
-    exact = db.distinct_values(schema, table, cand)
+    exact = db.distinct_values(schema, table, cand, timeout_s=cfg.categories_scan_timeout_s)
     if not exact:
         return
     completed = 0

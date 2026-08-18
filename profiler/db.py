@@ -104,21 +104,33 @@ class Db:
         logger.info("full %s.%s: строк=%d", schema, table, len(df))
         return df, len(df)
 
-    def distinct_values(self, schema: str, table: str, cols: list[str]) -> dict[str, list[str]]:
-        """Точный ПОЛНЫЙ набор значений для нескольких НИЗКОКАРДИНАЛЬНЫХ колонок за
-        ОДИН запрос (не пер-атрибут): array_agg(DISTINCT c) по каждой. Нужен потому,
-        что скошенные редкие категории не попадают в сэмпл, а pg_stats на вьюхах нет.
+    def distinct_values(self, schema: str, table: str, cols: list[str], *,
+                        timeout_s: int = 1200) -> dict[str, list[str]]:
+        """Точный ПОЛНЫЙ набор значений для нескольких НИЗКОКАРДИНАЛЬНЫХ колонок.
+        Скошенные редкие категории не попадают в сэмпл, а pg_stats на вьюхах нет.
+
+        Агрегировать напрямую по цепочке вьюх дорого/виснет, поэтому сперва
+        МАТЕРИАЛИЗУЕМ данные во временную таблицу my_tab, а array_agg(DISTINCT …)
+        гоним уже по ней (по физической таблице план предсказуемый). Всё в одном
+        соединении/транзакции; на КАЖДЫЙ шаг — statement_timeout=timeout_s (LOCAL,
+        сбрасывается в конце транзакции, не протекает в пул).
         Вызывать только для колонок-кандидатов (мало уникальных) — массивы малы.
         Ошибка/таймаут → {} (деградация на категории по сэмплу), прогон не падает."""
         if not cols:
             return {}
         ident = f'"{schema}"."{table}"'
-        selects = ", ".join(f'array_agg(DISTINCT "{c}"::text) AS "{c}"' for c in cols)
-        sql = f"SELECT {selects} FROM {ident}"
+        agg = ", ".join(f'array_agg(DISTINCT "{c}"::text) AS "{c}"' for c in cols)
+        agg_sql = f"SELECT {agg} FROM my_tab"
+        label = f"добор категорий {schema}.{table} ({len(cols)} колонок, через temp my_tab)"
         try:
-            with self._timed(f"добор категорий {schema}.{table} ({len(cols)} колонок, СКАН вьюхи)", sql), \
-                    self.engine.connect() as conn:
-                row = conn.execute(text(sql)).mappings().first()
+            with self._timed(label), self.engine.begin() as conn:
+                conn.execute(text(f"SET LOCAL statement_timeout = {int(timeout_s) * 1000}"))
+                conn.execute(text("DROP TABLE IF EXISTS my_tab"))
+                with self._timed(f"материализация temp my_tab ← {ident}",
+                                 f"CREATE TEMP TABLE my_tab AS SELECT * FROM {ident}"):
+                    conn.execute(text(f"CREATE TEMP TABLE my_tab AS SELECT * FROM {ident}"))
+                with self._timed("array_agg по my_tab", agg_sql):
+                    row = conn.execute(text(agg_sql)).mappings().first()
         except Exception as exc:  # noqa: BLE001
             logger.warning("distinct_values %s.%s: %s", schema, table, exc)
             return {}
