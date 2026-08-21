@@ -11,7 +11,7 @@ import sys
 
 from . import io
 from .config import RunConfig, from_namespace
-from .db import Db
+from .db import Db, KerberosExpiredError, is_kerberos_error
 from .env import load_dotenv
 from .llm import LLMClient
 from .profile import find_pk_candidates, profile_table
@@ -51,7 +51,13 @@ def run(ns) -> dict:
         logger.info("=== %s ===", fqn)
         try:
             entry = _process_table(cfg, db, synth, schema, table)
+        except KerberosExpiredError as exc:
+            logger.error("%s — прогон остановлен на %s", exc, fqn)
+            raise                          # весь прогон стоп: обнови kinit и перезапусти
         except Exception as exc:  # noqa: BLE001
+            if is_kerberos_error(exc):
+                logger.error("%s — прогон остановлен на %s", KerberosExpiredError.__doc__, fqn)
+                raise KerberosExpiredError(str(exc)) from exc
             logger.exception("Таблица %s пропущена: %s", fqn, exc)
             entries.append({"fqn": fqn, "status": "error", "error": str(exc)})
             continue
@@ -151,7 +157,8 @@ def _complete_categories(cfg, db, schema: str, table: str, profile) -> None:
         cand = cand[:limit]
     if not cand:
         return
-    exact = db.distinct_values(schema, table, cand, timeout_s=cfg.categories_scan_timeout_s)
+    exact = db.distinct_values(schema, table, cand, timeout_s=cfg.categories_scan_timeout_s,
+                               batch_cols=cfg.categories_scan_batch_cols)
     if not exact:
         return
     completed = 0

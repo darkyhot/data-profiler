@@ -22,6 +22,23 @@ from sqlalchemy.engine import Engine
 
 logger = logging.getLogger(__name__)
 
+_KRB_HINT = "Kerberos-тикет истёк (GSSAPI). Обнови тикет: kinit, затем перезапусти прогон."
+_KRB_TOKENS = ("kerberos", "gssapi", "krb5", "ticket", "credentials cache", "no credentials")
+
+
+class KerberosExpiredError(RuntimeError):
+    """Истёк Kerberos-тикет / ошибка GSSAPI — прогон надо остановить и сделать kinit."""
+
+
+def is_kerberos_error(exc: object) -> bool:
+    s = str(exc).lower()
+    return any(t in s for t in _KRB_TOKENS)
+
+
+def _raise_if_kerberos(exc: BaseException) -> None:
+    if is_kerberos_error(exc):
+        raise KerberosExpiredError(_KRB_HINT) from exc
+
 
 def _short(sql: str, limit: int = 500) -> str:
     """SQL в одну строку для лога (обрезка длинных)."""
@@ -68,6 +85,7 @@ class Db:
             n = int(row[0]) if row and row[0] is not None else 0
             return max(n, 0)
         except Exception as exc:  # noqa: BLE001
+            _raise_if_kerberos(exc)
             logger.warning("estimate_rows %s.%s: %s", schema, table, exc)
             return 0
 
@@ -105,40 +123,48 @@ class Db:
         return df, len(df)
 
     def distinct_values(self, schema: str, table: str, cols: list[str], *,
-                        timeout_s: int = 1200) -> dict[str, list[str]]:
+                        timeout_s: int = 1200, batch_cols: int = 5) -> dict[str, list[str]]:
         """Точный ПОЛНЫЙ набор значений для нескольких НИЗКОКАРДИНАЛЬНЫХ колонок.
         Скошенные редкие категории не попадают в сэмпл, а pg_stats на вьюхах нет.
 
-        Агрегировать напрямую по цепочке вьюх дорого/виснет, поэтому сперва
-        МАТЕРИАЛИЗУЕМ данные во временную таблицу my_tab, а array_agg(DISTINCT …)
-        гоним уже по ней (по физической таблице план предсказуемый). Всё в одном
-        соединении/транзакции; на КАЖДЫЙ шаг — statement_timeout=timeout_s (LOCAL,
-        сбрасывается в конце транзакции, не протекает в пул).
-        Вызывать только для колонок-кандидатов (мало уникальных) — массивы малы.
-        Ошибка/таймаут → {} (деградация на категории по сэмплу), прогон не падает."""
+        Агрегировать напрямую по цепочке вьюх дорого/виснет, поэтому:
+        1) материализуем во временную таблицу my_tab ТОЛЬКО нужные колонки-кандидаты
+           (не SELECT * — на широких таблицах это в разы меньше данных);
+        2) array_agg(DISTINCT …) считаем ПАЧКАМИ по batch_cols колонок (несколько
+           distinct-агрегатов в одном запросе на Greenplum жрут память/спиллят).
+        Всё в одном соединении/транзакции; на КАЖДЫЙ statement — statement_timeout
+        (LOCAL, сбрасывается в конце транзакции). Kerberos-ошибка пробрасывается
+        (прогон надо остановить). Прочая ошибка/таймаут → вернуть уже собранное
+        (частичный результат), остальные колонки останутся по сэмплу."""
         if not cols:
             return {}
         ident = f'"{schema}"."{table}"'
-        agg = ", ".join(f'array_agg(DISTINCT "{c}"::text) AS "{c}"' for c in cols)
-        agg_sql = f"SELECT {agg} FROM my_tab"
-        label = f"добор категорий {schema}.{table} ({len(cols)} колонок, через temp my_tab)"
+        cols_sql = ", ".join(f'"{c}"' for c in cols)
+        step = batch_cols if batch_cols and batch_cols > 0 else len(cols)
+        batches = [cols[i:i + step] for i in range(0, len(cols), step)]
+        out: dict[str, list[str]] = {}
+        label = (f"добор категорий {schema}.{table} ({len(cols)} колонок, "
+                 f"temp my_tab, {len(batches)} пачк(и) по {step})")
         try:
             with self._timed(label), self.engine.begin() as conn:
                 conn.execute(text(f"SET LOCAL statement_timeout = {int(timeout_s) * 1000}"))
                 conn.execute(text("DROP TABLE IF EXISTS my_tab"))
-                with self._timed(f"материализация temp my_tab ← {ident}",
-                                 f"CREATE TEMP TABLE my_tab AS SELECT * FROM {ident}"):
-                    conn.execute(text(f"CREATE TEMP TABLE my_tab AS SELECT * FROM {ident}"))
-                with self._timed("array_agg по my_tab", agg_sql):
-                    row = conn.execute(text(agg_sql)).mappings().first()
+                create_sql = f"CREATE TEMP TABLE my_tab AS SELECT {cols_sql} FROM {ident}"
+                with self._timed(f"материализация temp my_tab ← {ident} ({len(cols)} колонок)", create_sql):
+                    conn.execute(text(create_sql))
+                for k, chunk in enumerate(batches, 1):
+                    agg = ", ".join(f'array_agg(DISTINCT "{c}"::text) AS "{c}"' for c in chunk)
+                    agg_sql = f"SELECT {agg} FROM my_tab"
+                    with self._timed(f"array_agg my_tab батч {k}/{len(batches)} ({len(chunk)} колонок)", agg_sql):
+                        row = conn.execute(text(agg_sql)).mappings().first()
+                    if row:
+                        for c in chunk:
+                            vals = row.get(c) or []
+                            out[c] = [str(v) for v in vals if v is not None]
         except Exception as exc:  # noqa: BLE001
-            logger.warning("distinct_values %s.%s: %s", schema, table, exc)
-            return {}
-        out: dict[str, list[str]] = {}
-        if row:
-            for c in cols:
-                vals = row.get(c) or []
-                out[c] = [str(v) for v in vals if v is not None]
+            _raise_if_kerberos(exc)
+            logger.warning("distinct_values %s.%s: %s (собрано колонок: %d)",
+                           schema, table, exc, len(out))
         return out
 
     def verify_unique(self, schema: str, table: str, cols: list[str]) -> bool:
@@ -156,6 +182,7 @@ class Db:
                 dup = conn.execute(text(sql)).fetchone()
             return dup is None
         except Exception as exc:  # noqa: BLE001
+            _raise_if_kerberos(exc)
             logger.warning("verify_unique %s.%s %s: %s", schema, table, cols, exc)
             return False
 
@@ -219,6 +246,7 @@ class Db:
                 tc = conn.execute(table_sql, {"reg": reg}).scalar()
                 col_rows = conn.execute(col_sql, {"reg": reg}).fetchall()
         except Exception as exc:  # noqa: BLE001
+            _raise_if_kerberos(exc)
             logger.warning("read_comments %s: %s", reg, exc)
             return "", {}
         cols = {r[0]: (r[1] or "") for r in col_rows}
